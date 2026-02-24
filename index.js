@@ -20,17 +20,19 @@ if (!BOT_TOKEN) {
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
 const activeLogins = new Map();
+const pairingUsers = new Map();
 
 /* ================= START ================= */
 
 bot.onText(/\/start/, (msg) => {
   bot.sendMessage(
     msg.chat.id,
-`🤖 Welcome To Whatsapp Checker Bot 
+`🤖 Welcome To Whatsapp Checker Bot
 
-/login - Login WhatsApp
+/login - Login with QR
+/pair - Login with Pair Code
 /logout - Logout
-/cancel - Cancel login`
+/cancel - Cancel process`
   );
 });
 
@@ -39,39 +41,33 @@ bot.onText(/\/start/, (msg) => {
 bot.onText(/\/cancel/, async (msg) => {
   const userId = msg.from.id;
 
-  if (!activeLogins.has(userId)) {
-    return bot.sendMessage(msg.chat.id, "No active login.");
+  if (activeLogins.has(userId)) {
+    try { activeLogins.get(userId).sock.ws.close(); } catch {}
+    activeLogins.delete(userId);
+    await fs.remove(`sessions/${userId}`);
   }
 
-  const sessionPath = `sessions/${userId}`;
+  pairingUsers.delete(userId);
 
-  activeLogins.get(userId).sock.ws.close();
-  activeLogins.delete(userId);
-  await fs.remove(sessionPath);
-
-  bot.sendMessage(msg.chat.id, "❌ Login cancelled.");
+  bot.sendMessage(msg.chat.id, "❌ Process cancelled.");
 });
 
-/* ================= LOGOUT (FIXED) ================= */
+/* ================= LOGOUT ================= */
 
 bot.onText(/\/logout/, async (msg) => {
   const userId = msg.from.id;
   const sessionPath = `sessions/${userId}`;
   const credsPath = `${sessionPath}/creds.json`;
 
-  // Only logout if real credentials exist
   if (!(await fs.pathExists(credsPath))) {
-    return bot.sendMessage(
-      msg.chat.id,
-      "❌ No linked WhatsApp account found."
-    );
+    return bot.sendMessage(msg.chat.id, "❌ No linked WhatsApp account found.");
   }
 
   await fs.remove(sessionPath);
   bot.sendMessage(msg.chat.id, "✅ Logged out successfully.");
 });
 
-/* ================= LOGIN ================= */
+/* ================= LOGIN (QR) ================= */
 
 bot.onText(/\/login/, async (msg) => {
   const userId = msg.from.id;
@@ -79,10 +75,9 @@ bot.onText(/\/login/, async (msg) => {
   const credsPath = `${sessionPath}/creds.json`;
 
   if (activeLogins.has(userId)) {
-    return bot.sendMessage(msg.chat.id, "⚠️ Login already in progress.");
+    return bot.sendMessage(msg.chat.id, "⚠️ Process already running.");
   }
 
-  // If already logged in
   if (await fs.pathExists(credsPath)) {
     return bot.sendMessage(msg.chat.id, "✅ Already logged in.");
   }
@@ -95,7 +90,8 @@ bot.onText(/\/login/, async (msg) => {
   const sock = makeWASocket({
     version,
     auth: state,
-    logger: P({ level: "silent" })
+    logger: P({ level: "silent" }),
+    browser: ["Mac OS", "Safari", "10.15.7"]
   });
 
   sock.ev.on("creds.update", saveCreds);
@@ -108,20 +104,18 @@ bot.onText(/\/login/, async (msg) => {
   sock.ev.on("connection.update", async (update) => {
     const { qr, connection, lastDisconnect } = update;
 
-    /* ---- QR SEND ONCE ---- */
     if (qr && !qrSent) {
       qrSent = true;
 
       const qrImage = await qrcode.toBuffer(qr);
 
       await bot.sendPhoto(msg.chat.id, qrImage, {
-        caption: "📱 Scan within 2 minutes. /cancel"
+        caption: "📱 Scan within 2 minutes.\nUse /cancel to stop."
       });
 
-      // Timeout 2 minutes
       setTimeout(async () => {
         if (!loginSuccess && activeLogins.has(userId)) {
-          sock.ws.close();
+          try { sock.ws.close(); } catch {}
           activeLogins.delete(userId);
           await fs.remove(sessionPath);
           bot.sendMessage(msg.chat.id, "⏰ QR expired.");
@@ -129,20 +123,110 @@ bot.onText(/\/login/, async (msg) => {
       }, 120000);
     }
 
-    /* ---- SUCCESS ---- */
     if (connection === "open") {
       loginSuccess = true;
       activeLogins.delete(userId);
       bot.sendMessage(msg.chat.id, "✅ WhatsApp linked successfully.");
     }
 
-    /* ---- CLOSE BEFORE SUCCESS ---- */
     if (connection === "close") {
       const loggedOut =
         lastDisconnect?.error?.output?.statusCode ===
         DisconnectReason.loggedOut;
 
       if (!loginSuccess || loggedOut) {
+        activeLogins.delete(userId);
+        await fs.remove(sessionPath);
+      }
+    }
+  });
+});
+
+/* ================= PAIR SYSTEM ================= */
+
+bot.onText(/\/pair/, async (msg) => {
+  const userId = msg.from.id;
+  const sessionPath = `sessions/${userId}`;
+  const credsPath = `${sessionPath}/creds.json`;
+
+  if (activeLogins.has(userId)) {
+    return bot.sendMessage(msg.chat.id, "⚠️ Process already running.");
+  }
+
+  if (await fs.pathExists(credsPath)) {
+    return bot.sendMessage(msg.chat.id, "✅ Already logged in.");
+  }
+
+  pairingUsers.set(userId, true);
+
+  bot.sendMessage(
+    msg.chat.id,
+    "📞 Send your WhatsApp number with country code.\nExample: 8801XXXXXXXXX"
+  );
+});
+
+/* ================= NUMBER RECEIVE ================= */
+
+bot.on("message", async (msg) => {
+  const userId = msg.from.id;
+  const text = msg.text;
+
+  if (!pairingUsers.has(userId)) return;
+  if (!text || text.startsWith("/")) return;
+
+  pairingUsers.delete(userId);
+
+  const phoneNumber = text.replace(/[^0-9]/g, "");
+
+  if (phoneNumber.length < 10) {
+    return bot.sendMessage(msg.chat.id, "❌ Invalid number.");
+  }
+
+  const sessionPath = `sessions/${userId}`;
+  await fs.ensureDir(sessionPath);
+
+  const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+  const { version } = await fetchLatestBaileysVersion();
+
+  const sock = makeWASocket({
+    version,
+    auth: state,
+    logger: P({ level: "silent" }),
+    browser: ["Mac OS", "Safari", "10.15.7"]
+  });
+
+  sock.ev.on("creds.update", saveCreds);
+
+  activeLogins.set(userId, { sock });
+
+  try {
+    const code = await sock.requestPairingCode(phoneNumber);
+
+    await bot.sendMessage(
+      msg.chat.id,
+      `🔢 Your Pair Code:\n\n*${code}*\n\nEnter this in WhatsApp > Linked Devices.`,
+      { parse_mode: "Markdown" }
+    );
+  } catch (err) {
+    activeLogins.delete(userId);
+    await fs.remove(sessionPath);
+    return bot.sendMessage(msg.chat.id, "❌ Failed to generate pairing code.");
+  }
+
+  sock.ev.on("connection.update", async (update) => {
+    const { connection, lastDisconnect } = update;
+
+    if (connection === "open") {
+      activeLogins.delete(userId);
+      bot.sendMessage(msg.chat.id, "✅ WhatsApp linked successfully.");
+    }
+
+    if (connection === "close") {
+      const loggedOut =
+        lastDisconnect?.error?.output?.statusCode ===
+        DisconnectReason.loggedOut;
+
+      if (loggedOut) {
         activeLogins.delete(userId);
         await fs.remove(sessionPath);
       }
