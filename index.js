@@ -6,9 +6,9 @@ const {
 } = require("@whiskeysockets/baileys");
 
 const TelegramBot = require("node-telegram-bot-api");
-const qrcode = require("qrcode");
 const P = require("pino");
 const fs = require("fs-extra");
+const qrcode = require("qrcode");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 
@@ -19,18 +19,18 @@ if (!BOT_TOKEN) {
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
-const activeLogins = new Map();
-const pairingUsers = new Map();
+const activeProcesses = new Map();
+const waitingForNumber = new Map();
 
 /* ================= START ================= */
 
 bot.onText(/\/start/, (msg) => {
   bot.sendMessage(
     msg.chat.id,
-`🤖 Welcome To Whatsapp Checker Bot
+`🤖 WhatsApp Login Bot
 
-/login - Login with QR
-/pair - Login with Pair Code
+/login  - Login with QR
+/pair   - Login with Pair Code
 /logout - Logout
 /cancel - Cancel process`
   );
@@ -41,13 +41,13 @@ bot.onText(/\/start/, (msg) => {
 bot.onText(/\/cancel/, async (msg) => {
   const userId = msg.from.id;
 
-  if (activeLogins.has(userId)) {
-    try { activeLogins.get(userId).sock.ws.close(); } catch {}
-    activeLogins.delete(userId);
+  if (activeProcesses.has(userId)) {
+    try { activeProcesses.get(userId).sock.ws.close(); } catch {}
     await fs.remove(`sessions/${userId}`);
+    activeProcesses.delete(userId);
   }
 
-  pairingUsers.delete(userId);
+  waitingForNumber.delete(userId);
 
   bot.sendMessage(msg.chat.id, "❌ Process cancelled.");
 });
@@ -60,27 +60,25 @@ bot.onText(/\/logout/, async (msg) => {
   const credsPath = `${sessionPath}/creds.json`;
 
   if (!(await fs.pathExists(credsPath))) {
-    return bot.sendMessage(msg.chat.id, "❌ No linked WhatsApp account found.");
+    return bot.sendMessage(msg.chat.id, "❌ No active WhatsApp session.");
   }
 
   await fs.remove(sessionPath);
   bot.sendMessage(msg.chat.id, "✅ Logged out successfully.");
 });
 
-/* ================= LOGIN (QR) ================= */
+/* ================= LOGIN QR ================= */
 
 bot.onText(/\/login/, async (msg) => {
   const userId = msg.from.id;
   const sessionPath = `sessions/${userId}`;
   const credsPath = `${sessionPath}/creds.json`;
 
-  if (activeLogins.has(userId)) {
+  if (activeProcesses.has(userId))
     return bot.sendMessage(msg.chat.id, "⚠️ Process already running.");
-  }
 
-  if (await fs.pathExists(credsPath)) {
+  if (await fs.pathExists(credsPath))
     return bot.sendMessage(msg.chat.id, "✅ Already logged in.");
-  }
 
   await fs.ensureDir(sessionPath);
 
@@ -96,10 +94,10 @@ bot.onText(/\/login/, async (msg) => {
 
   sock.ev.on("creds.update", saveCreds);
 
-  activeLogins.set(userId, { sock });
+  activeProcesses.set(userId, { sock });
 
   let qrSent = false;
-  let loginSuccess = false;
+  let connected = false;
 
   sock.ev.on("connection.update", async (update) => {
     const { qr, connection, lastDisconnect } = update;
@@ -110,22 +108,22 @@ bot.onText(/\/login/, async (msg) => {
       const qrImage = await qrcode.toBuffer(qr);
 
       await bot.sendPhoto(msg.chat.id, qrImage, {
-        caption: "📱 Scan within 2 minutes.\nUse /cancel to stop."
+        caption: "📱 Scan QR within 2 minutes.\nUse /cancel to stop."
       });
 
       setTimeout(async () => {
-        if (!loginSuccess && activeLogins.has(userId)) {
+        if (!connected && activeProcesses.has(userId)) {
           try { sock.ws.close(); } catch {}
-          activeLogins.delete(userId);
           await fs.remove(sessionPath);
+          activeProcesses.delete(userId);
           bot.sendMessage(msg.chat.id, "⏰ QR expired.");
         }
       }, 120000);
     }
 
     if (connection === "open") {
-      loginSuccess = true;
-      activeLogins.delete(userId);
+      connected = true;
+      activeProcesses.delete(userId);
       bot.sendMessage(msg.chat.id, "✅ WhatsApp linked successfully.");
     }
 
@@ -134,53 +132,50 @@ bot.onText(/\/login/, async (msg) => {
         lastDisconnect?.error?.output?.statusCode ===
         DisconnectReason.loggedOut;
 
-      if (!loginSuccess || loggedOut) {
-        activeLogins.delete(userId);
+      if (!connected || loggedOut) {
         await fs.remove(sessionPath);
+        activeProcesses.delete(userId);
       }
     }
   });
 });
 
-/* ================= PAIR SYSTEM ================= */
+/* ================= PAIR ================= */
 
 bot.onText(/\/pair/, async (msg) => {
   const userId = msg.from.id;
   const sessionPath = `sessions/${userId}`;
   const credsPath = `${sessionPath}/creds.json`;
 
-  if (activeLogins.has(userId)) {
+  if (activeProcesses.has(userId))
     return bot.sendMessage(msg.chat.id, "⚠️ Process already running.");
-  }
 
-  if (await fs.pathExists(credsPath)) {
+  if (await fs.pathExists(credsPath))
     return bot.sendMessage(msg.chat.id, "✅ Already logged in.");
-  }
 
-  pairingUsers.set(userId, true);
+  waitingForNumber.set(userId, true);
 
   bot.sendMessage(
     msg.chat.id,
-    "📞 Send your WhatsApp number with country code.\nExample: 8801XXXXXXXXX"
+    "📞 Send your WhatsApp number with country code.\nExample: 88017XXXXXXXX"
   );
 });
 
-/* ================= NUMBER RECEIVE ================= */
+/* ================= RECEIVE NUMBER ================= */
 
 bot.on("message", async (msg) => {
   const userId = msg.from.id;
   const text = msg.text;
 
-  if (!pairingUsers.has(userId)) return;
+  if (!waitingForNumber.has(userId)) return;
   if (!text || text.startsWith("/")) return;
 
-  pairingUsers.delete(userId);
+  waitingForNumber.delete(userId);
 
   const phoneNumber = text.replace(/[^0-9]/g, "");
 
-  if (phoneNumber.length < 10) {
-    return bot.sendMessage(msg.chat.id, "❌ Invalid number.");
-  }
+  if (phoneNumber.length < 10)
+    return bot.sendMessage(msg.chat.id, "❌ Invalid number format.");
 
   const sessionPath = `sessions/${userId}`;
   await fs.ensureDir(sessionPath);
@@ -197,27 +192,32 @@ bot.on("message", async (msg) => {
 
   sock.ev.on("creds.update", saveCreds);
 
-  activeLogins.set(userId, { sock });
+  activeProcesses.set(userId, { sock });
 
-  try {
-    const code = await sock.requestPairingCode(phoneNumber);
-
-    await bot.sendMessage(
-      msg.chat.id,
-      `🔢 Your Pair Code:\n\n*${code}*\n\nEnter this in WhatsApp > Linked Devices.`,
-      { parse_mode: "Markdown" }
-    );
-  } catch (err) {
-    activeLogins.delete(userId);
-    await fs.remove(sessionPath);
-    return bot.sendMessage(msg.chat.id, "❌ Failed to generate pairing code.");
-  }
+  let codeSent = false;
 
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect } = update;
 
+    if (connection === "connecting" && !codeSent) {
+      codeSent = true;
+      try {
+        const code = await sock.requestPairingCode(phoneNumber);
+
+        await bot.sendMessage(
+          msg.chat.id,
+          `🔢 Pairing Code:\n\n*${code}*\n\nEnter in WhatsApp > Linked Devices.`,
+          { parse_mode: "Markdown" }
+        );
+      } catch {
+        await fs.remove(sessionPath);
+        activeProcesses.delete(userId);
+        return bot.sendMessage(msg.chat.id, "❌ Failed to generate pairing code.");
+      }
+    }
+
     if (connection === "open") {
-      activeLogins.delete(userId);
+      activeProcesses.delete(userId);
       bot.sendMessage(msg.chat.id, "✅ WhatsApp linked successfully.");
     }
 
@@ -227,8 +227,8 @@ bot.on("message", async (msg) => {
         DisconnectReason.loggedOut;
 
       if (loggedOut) {
-        activeLogins.delete(userId);
         await fs.remove(sessionPath);
+        activeProcesses.delete(userId);
       }
     }
   });
