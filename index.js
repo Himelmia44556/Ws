@@ -40,7 +40,11 @@ bot.onText(/\/start/, (msg) => {
 bot.onText(/\/cancel/, async (msg) => {
   const id = msg.from.id;
 
-  waitingNumbers.delete(id);
+  // Cancel waiting for number
+  if (waitingNumbers.has(id)) {
+    waitingNumbers.delete(id);
+    return bot.sendMessage(msg.chat.id, "❌ Pairing cancelled.");
+  }
 
   if (!activeSessions.has(id))
     return bot.sendMessage(msg.chat.id, "No active process.");
@@ -52,7 +56,7 @@ bot.onText(/\/cancel/, async (msg) => {
   activeSessions.delete(id);
   await fs.remove(path);
 
-  bot.sendMessage(msg.chat.id, "❌ Cancelled.");
+  bot.sendMessage(msg.chat.id, "❌ Process cancelled.");
 });
 
 /* ================= LOGOUT ================= */
@@ -88,27 +92,42 @@ bot.onText(/\/pair/, (msg) => {
     return bot.sendMessage(msg.chat.id, "Process already running.");
 
   waitingNumbers.set(id, true);
-  bot.sendMessage(msg.chat.id, "Send number with country code.\nExample: 8801XXXXXXXXX");
+  bot.sendMessage(
+    msg.chat.id,
+    "Send your WhatsApp number with country code.\nExample: 8801XXXXXXXXX"
+  );
 });
 
 /* ================= RECEIVE NUMBER ================= */
 
 bot.on("message", async (msg) => {
   const id = msg.from.id;
+
   if (!waitingNumbers.has(id)) return;
   if (!msg.text) return;
 
-  waitingNumbers.delete(id);
+  // If user sends another command → cancel pairing
+  if (msg.text.startsWith("/")) {
+    waitingNumbers.delete(id);
+    return bot.sendMessage(msg.chat.id, "❌ Pairing cancelled.");
+  }
 
   const number = msg.text.replace(/[^0-9]/g, "");
 
-  if (number.length < 8)
-    return bot.sendMessage(msg.chat.id, "Invalid number format.");
+  // Strict validation (10–15 digits)
+  if (!/^[0-9]{10,15}$/.test(number)) {
+    return bot.sendMessage(
+      msg.chat.id,
+      "Invalid number format.\nSend like: 8801XXXXXXXXX"
+    );
+  }
+
+  waitingNumbers.delete(id);
 
   startConnection(msg, id, "pair", number);
 });
 
-/* ================= MAIN FUNCTION ================= */
+/* ================= MAIN CONNECTION ================= */
 
 async function startConnection(msg, id, mode, number = null) {
 
@@ -143,7 +162,6 @@ async function startConnection(msg, id, mode, number = null) {
           `🔐 Pair Code:\n\n*${code}*\n\nWhatsApp → Linked Devices → Link with phone number\n\nValid 2 minutes.`,
           { parse_mode: "Markdown" }
         );
-
       } catch (err) {
         activeSessions.delete(id);
         await fs.remove(path);
