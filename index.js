@@ -154,23 +154,29 @@ async function startConnection(msg, userId, sessionPath, mode, phoneNumber = nul
       });
     }
 
-    /* ===== PAIR MODE (FIXED) ===== */
+    /* ===== PAIR MODE (FIXED TIMING) ===== */
     if (mode === "pair" && connection === "connecting" && !codeSent) {
-      try {
-        codeSent = true;
 
-        const code = await sock.requestPairingCode(phoneNumber);
+      setTimeout(async () => {
+        try {
+          if (sock.authState.creds.registered) return;
 
-        await bot.sendMessage(
-          msg.chat.id,
-          `🔐 Pairing Code:\n\n*${code}*\n\nWhatsApp → Linked Devices → Link with phone number\n\nValid 2 minutes.`,
-          { parse_mode: "Markdown" }
-        );
-      } catch (err) {
-        activeLogins.delete(userId);
-        await fs.remove(sessionPath);
-        return bot.sendMessage(msg.chat.id, "❌ Failed to generate pairing code.");
-      }
+          const code = await sock.requestPairingCode(phoneNumber);
+
+          codeSent = true;
+
+          await bot.sendMessage(
+            msg.chat.id,
+            `🔐 Pairing Code:\n\n*${code}*\n\nWhatsApp → Linked Devices → Link with phone number\n\nValid 2 minutes.`,
+            { parse_mode: "Markdown" }
+          );
+
+        } catch (err) {
+          activeLogins.delete(userId);
+          await fs.remove(sessionPath);
+          return bot.sendMessage(msg.chat.id, "❌ Failed to generate pairing code.");
+        }
+      }, 2000);
     }
 
     /* ===== SUCCESS ===== */
