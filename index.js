@@ -59,7 +59,6 @@ bot.onText(/\/logout/, async (msg) => {
   const sessionPath = `sessions/${userId}`;
   const credsPath = `${sessionPath}/creds.json`;
 
-  // Only logout if real credentials exist
   if (!(await fs.pathExists(credsPath))) {
     return bot.sendMessage(
       msg.chat.id,
@@ -82,7 +81,6 @@ bot.onText(/\/login/, async (msg) => {
     return bot.sendMessage(msg.chat.id, "⚠️ Login already in progress.");
   }
 
-  // If already logged in
   if (await fs.pathExists(credsPath)) {
     return bot.sendMessage(msg.chat.id, "✅ Already logged in.");
   }
@@ -95,7 +93,8 @@ bot.onText(/\/login/, async (msg) => {
   const sock = makeWASocket({
     version,
     auth: state,
-    logger: P({ level: "silent" })
+    logger: P({ level: "silent" }),
+    browser: ["Mac OS", "Safari", "10.15.7"] // ✅ MacOS browser added
   });
 
   sock.ev.on("creds.update", saveCreds);
@@ -108,7 +107,6 @@ bot.onText(/\/login/, async (msg) => {
   sock.ev.on("connection.update", async (update) => {
     const { qr, connection, lastDisconnect } = update;
 
-    /* ---- QR SEND ONCE ---- */
     if (qr && !qrSent) {
       qrSent = true;
 
@@ -118,7 +116,6 @@ bot.onText(/\/login/, async (msg) => {
         caption: "📱 Scan within 2 minutes. /cancel"
       });
 
-      // Timeout 2 minutes
       setTimeout(async () => {
         if (!loginSuccess && activeLogins.has(userId)) {
           sock.ws.close();
@@ -129,14 +126,12 @@ bot.onText(/\/login/, async (msg) => {
       }, 120000);
     }
 
-    /* ---- SUCCESS ---- */
     if (connection === "open") {
       loginSuccess = true;
       activeLogins.delete(userId);
       bot.sendMessage(msg.chat.id, "✅ WhatsApp linked successfully.");
     }
 
-    /* ---- CLOSE BEFORE SUCCESS ---- */
     if (connection === "close") {
       const loggedOut =
         lastDisconnect?.error?.output?.statusCode ===
