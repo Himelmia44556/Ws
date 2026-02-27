@@ -1,194 +1,128 @@
-const fs = require('fs');
-const path = require('path');
-const { Client, LocalAuth } = require('whatsapp-web.js');
-const TelegramBot = require('node-telegram-bot-api');
-const QRCode = require('qrcode');
+require("dotenv").config();
 
-const TELEGRAM_TOKEN = "8739857066:AAFs5DzC4Mv93LJHBJEhSKzQVwrcKJlW6tc";
+const fs = require("fs");
+const path = require("path");
+const QRCode = require("qrcode");
+const TelegramBot = require("node-telegram-bot-api");
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require("@whiskeysockets/baileys");
+const P = require("pino");
 
-const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
 
 const sessions = new Map();
 const loginProcesses = new Map();
 
-function deleteSessionFolder(userId) {
-    const sessionPath = path.join('./sessions', `session-${userId}`);
-    if (fs.existsSync(sessionPath)) {
-        fs.rmSync(sessionPath, { recursive: true, force: true });
-    }
-}
+//////////////////////////////////////////////////////
 
-function startLogin(userId) {
+async function startLogin(userId) {
 
-    const client = new Client({
-        authStrategy: new LocalAuth({
-            clientId: userId.toString(),
-            dataPath: './sessions'
-        }),
-        puppeteer: { headless: true }
+    if (sessions.has(userId))
+        return bot.sendMessage(userId, "⚠️ ᴀʟʀᴇᴀᴅʏ ʟɪɴᴋᴇᴅ.");
+
+    if (loginProcesses.has(userId))
+        return bot.sendMessage(userId, "⏳ ʟᴏɢɪɴ ɪɴ ᴘʀᴏᴄᴇꜱꜱ.");
+
+    const sessionPath = path.join(__dirname, "sessions", userId.toString());
+    const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+
+    const sock = makeWASocket({
+        auth: state,
+        logger: P({ level: "silent" })
     });
 
-    let authenticated = false;
+    loginProcesses.set(userId, sock);
 
-    client.on('qr', async (qr) => {
+    sock.ev.on("creds.update", saveCreds);
 
-        const qrImage = await QRCode.toBuffer(qr);
+    sock.ev.on("connection.update", async (update) => {
 
-        await bot.sendPhoto(userId, qrImage, {
-            caption:
-`🔐 ᴡʜᴀᴛꜱᴀᴘᴘ ʟᴏɢɪɴ ǫʀ
+        const { connection, qr, lastDisconnect } = update;
 
-⏳ ᴘʟᴇᴀꜱᴇ ꜱᴄᴀɴ ᴡɪᴛʜɪɴ 1 ᴍɪɴᴜᴛᴇ.
-❌ ᴜꜱᴇ /ᴄᴀɴᴄᴇʟ ᴛᴏ ꜱᴛᴏᴘ ʟᴏɢɪɴ.`
-        });
+        if (qr) {
+            const qrImage = await QRCode.toBuffer(qr);
 
-        const timeout = setTimeout(async () => {
-            if (!authenticated) {
-                await client.destroy();
-                deleteSessionFolder(userId);
-                loginProcesses.delete(userId);
+            await bot.sendPhoto(userId, qrImage, {
+                caption: "🔐 ꜱᴄᴀɴ ᴡɪᴛʜɪɴ 1 ᴍɪɴᴜᴛᴇ.\n❌ /cancel ᴛᴏ ꜱᴛᴏᴘ."
+            });
 
-                bot.sendMessage(userId,
-`⌛ ǫʀ ᴇxᴘɪʀᴇᴅ
-
-ꜱᴇꜱꜱɪᴏɴ ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ ᴄᴀɴᴄᴇʟʟᴇᴅ.`);
-            }
-        }, 60 * 1000);
-
-        loginProcesses.set(userId, { client, timeout });
-    });
-
-    client.on('authenticated', () => {
-        authenticated = true;
-    });
-
-    client.on('ready', () => {
-
-        authenticated = true;
-
-        if (loginProcesses.has(userId)) {
-            clearTimeout(loginProcesses.get(userId).timeout);
-            loginProcesses.delete(userId);
+            // 1 minute timeout
+            setTimeout(async () => {
+                if (loginProcesses.has(userId)) {
+                    await sock.logout();
+                    loginProcesses.delete(userId);
+                    fs.rmSync(sessionPath, { recursive: true, force: true });
+                    bot.sendMessage(userId, "⌛ ǫʀ ᴇxᴘɪʀᴇᴅ.");
+                }
+            }, 60000);
         }
 
-        sessions.set(userId, client);
+        if (connection === "open") {
+            loginProcesses.delete(userId);
+            sessions.set(userId, sock);
+            bot.sendMessage(userId, "✅ ʟɪɴᴋᴇᴅ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ.");
+        }
 
-        bot.sendMessage(userId,
-`✅ ᴡʜᴀᴛꜱᴀᴘᴘ ʟɪɴᴋᴇᴅ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ!
+        if (connection === "close") {
+            const shouldReconnect =
+                lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
 
-ʏᴏᴜʀ ᴀᴄᴄᴏᴜɴᴛ ɪꜱ ɴᴏᴡ ᴄᴏɴɴᴇᴄᴛᴇᴅ.`);
+            if (!shouldReconnect) {
+                sessions.delete(userId);
+                fs.rmSync(sessionPath, { recursive: true, force: true });
+                bot.sendMessage(userId, "⚠️ ᴅɪꜱᴄᴏɴɴᴇᴄᴛᴇᴅ.");
+            }
+        }
     });
-
-    client.on('disconnected', () => {
-        sessions.delete(userId);
-        deleteSessionFolder(userId);
-
-        bot.sendMessage(userId,
-`⚠️ ᴡʜᴀᴛꜱᴀᴘᴘ ᴅɪꜱᴄᴏɴɴᴇᴄᴛᴇᴅ
-
-ꜱᴇꜱꜱɪᴏɴ ʀᴇᴍᴏᴠᴇᴅ.`);
-    });
-
-    client.initialize();
 }
 
-//////////////////////////////////////////////////////
-// /start
 //////////////////////////////////////////////////////
 
 bot.onText(/\/start/, (msg) => {
-
-    const welcomeText =
+    bot.sendMessage(msg.chat.id,
 `✨ ᴡᴇʟᴄᴏᴍᴇ ᴛᴏ ᴡʜᴀᴛꜱᴀᴘᴘ ʟᴏɢɪɴ ʙᴏᴛ
 
-ꜱᴇᴄᴜʀᴇʟʏ ʟɪɴᴋ ʏᴏᴜʀ ᴡʜᴀᴛꜱᴀᴘᴘ ᴀᴄᴄᴏᴜɴᴛ.
-
-━━━━━━━━━━━━━━━━━━
-🔹 /qr — ʟᴏɢɪɴ ᴡʜᴀᴛꜱᴀᴘᴘ
-🔹 /logout — ʟᴏɢᴏᴜᴛ ᴀᴄᴄᴏᴜɴᴛ
-🔹 /cancel — ᴄᴀɴᴄᴇʟ ʟᴏɢɪɴ
-━━━━━━━━━━━━━━━━━━
-
-⚠️ ᴇᴀᴄʜ ᴜꜱᴇʀ ᴄᴀɴ ʟɪɴᴋ ᴏɴʟʏ ᴏɴᴇ ᴀᴄᴄᴏᴜɴᴛ.`;
-
-    bot.sendMessage(msg.chat.id, welcomeText);
+/qr — ʟᴏɢɪɴ
+/logout — ʟᴏɢᴏᴜᴛ
+/cancel — ᴄᴀɴᴄᴇʟ`
+    );
 });
-
-//////////////////////////////////////////////////////
-// /qr
-//////////////////////////////////////////////////////
 
 bot.onText(/\/qr/, (msg) => {
-
-    const userId = msg.chat.id;
-
-    if (sessions.has(userId)) {
-        return bot.sendMessage(userId,
-`⚠️ ᴀᴄᴄᴏᴜɴᴛ ᴀʟʀᴇᴀᴅʏ ʟɪɴᴋᴇᴅ
-
-ʏᴏᴜ ᴄᴀɴɴᴏᴛ ʟɪɴᴋ ᴍᴜʟᴛɪᴘʟᴇ ᴀᴄᴄᴏᴜɴᴛꜱ.`);
-    }
-
-    if (loginProcesses.has(userId)) {
-        return bot.sendMessage(userId,
-`⏳ ʟᴏɢɪɴ ᴀʟʀᴇᴀᴅʏ ɪɴ ᴘʀᴏᴄᴇꜱꜱ
-
-ꜱᴄᴀɴ ᴛʜᴇ ǫʀ ᴏʀ ᴜꜱᴇ /ᴄᴀɴᴄᴇʟ.`);
-    }
-
-    startLogin(userId);
+    startLogin(msg.chat.id);
 });
-
-//////////////////////////////////////////////////////
-// /cancel
-//////////////////////////////////////////////////////
 
 bot.onText(/\/cancel/, async (msg) => {
 
     const userId = msg.chat.id;
 
-    if (!loginProcesses.has(userId)) {
-        return bot.sendMessage(userId,
-`❌ ɴᴏ ᴀᴄᴛɪᴠᴇ ʟᴏɢɪɴ ᴘʀᴏᴄᴇꜱꜱ.`);
-    }
+    if (!loginProcesses.has(userId))
+        return bot.sendMessage(userId, "❌ ɴᴏ ʟᴏɢɪɴ ᴘʀᴏᴄᴇꜱꜱ.");
 
-    const { client, timeout } = loginProcesses.get(userId);
+    const sock = loginProcesses.get(userId);
+    await sock.logout();
 
-    clearTimeout(timeout);
-    await client.destroy();
-    deleteSessionFolder(userId);
+    const sessionPath = path.join(__dirname, "sessions", userId.toString());
+    fs.rmSync(sessionPath, { recursive: true, force: true });
+
     loginProcesses.delete(userId);
 
-    bot.sendMessage(userId,
-`❌ ʟᴏɢɪɴ ᴄᴀɴᴄᴇʟʟᴇᴅ
-
-ꜱᴇꜱꜱɪᴏɴ ᴅᴇʟᴇᴛᴇᴅ.`);
+    bot.sendMessage(userId, "❌ ʟᴏɢɪɴ ᴄᴀɴᴄᴇʟʟᴇᴅ.");
 });
-
-//////////////////////////////////////////////////////
-// /logout
-//////////////////////////////////////////////////////
 
 bot.onText(/\/logout/, async (msg) => {
 
     const userId = msg.chat.id;
 
-    if (!sessions.has(userId)) {
-        return bot.sendMessage(userId,
-`❌ ɴᴏ ᴀᴄᴛɪᴠᴇ ᴡʜᴀᴛꜱᴀᴘᴘ ꜱᴇꜱꜱɪᴏɴ.`);
-    }
+    if (!sessions.has(userId))
+        return bot.sendMessage(userId, "❌ ɴᴏ ᴀᴄᴛɪᴠᴇ ꜱᴇꜱꜱɪᴏɴ.");
 
-    const client = sessions.get(userId);
+    const sock = sessions.get(userId);
+    await sock.logout();
 
-    await client.logout();
-    await client.destroy();
+    const sessionPath = path.join(__dirname, "sessions", userId.toString());
+    fs.rmSync(sessionPath, { recursive: true, force: true });
 
-    deleteSessionFolder(userId);
     sessions.delete(userId);
 
-    bot.sendMessage(userId,
-`✅ ʟᴏɢɢᴇᴅ ᴏᴜᴛ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ
-
-ʏᴏᴜʀ ꜱᴇꜱꜱɪᴏɴ ʜᴀꜱ ʙᴇᴇɴ ʀᴇᴍᴏᴠᴇᴅ.`);
-
+    bot.sendMessage(userId, "✅ ʟᴏɢᴏᴜᴛ ꜱᴜᴄᴄᴇꜱꜱ.");
 });
