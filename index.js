@@ -11,7 +11,7 @@ const P = require("pino")
 const QRCode = require("qrcode")
 const fs = require("fs")
 
-const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true })
+const bot = new TelegramBot("8739857066:AAFs5DzC4Mv93LJHBJEhSKzQVwrcKJlW6tc", { polling: true })
 
 const sessions = new Map()
 const loginProcess = new Map()
@@ -136,3 +136,4 @@ bot.onText(/\/logout/, async (msg) => {
   fs.rmSync(sessionPath, { recursive: true, force: true })
 
   bot.sendMessage(id, small("logged out successfully."))
+
