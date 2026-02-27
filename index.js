@@ -1,5 +1,3 @@
-
-
 const TelegramBot = require("node-telegram-bot-api")
 const {
   default: makeWASocket,
@@ -11,15 +9,17 @@ const P = require("pino")
 const QRCode = require("qrcode")
 const fs = require("fs")
 
-const bot = new TelegramBot("8739857066:AAFs5DzC4Mv93LJHBJEhSKzQVwrcKJlW6tc", { polling: true })
+// 🔥 PUT YOUR BOT TOKEN HERE
+const BOT_TOKEN = "8739857066:AAFs5DzC4Mv93LJHBJEhSKzQVwrcKJlW6tc"
+
+const bot = new TelegramBot(BOT_TOKEN, { polling: true })
 
 const sessions = new Map()
 const loginProcess = new Map()
 
-// small text style
 const small = (t) => t.toLowerCase()
 
-// start
+// START
 bot.onText(/\/start/, (msg) => {
   bot.sendMessage(
     msg.chat.id,
@@ -110,8 +110,8 @@ bot.onText(/\/cancel/, async (msg) => {
   }
 
   loginProcess.delete(id)
-  const sessionPath = `./sessions/${id}`
 
+  const sessionPath = `./sessions/${id}`
   if (fs.existsSync(sessionPath)) {
     fs.rmSync(sessionPath, { recursive: true, force: true })
   }
@@ -136,4 +136,4 @@ bot.onText(/\/logout/, async (msg) => {
   fs.rmSync(sessionPath, { recursive: true, force: true })
 
   bot.sendMessage(id, small("logged out successfully."))
-
+})
