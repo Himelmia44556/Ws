@@ -1,0 +1,27 @@
+{
+  "name": "whatsapp-telegram-login-bot",
+  "version": "1.0.0",
+  "description": "Multi-user WhatsApp login bot with QR, timeout, cancel and logout system",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "telegram",
+    "bot",
+    "multi-user",
+    "qr-login"
+  ],
+  "author": "your-name",
+  "license": "ISC",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "node-telegram-bot-api": "^0.64.0",
+    "qrcode": "^1.5.4",
+    "whatsapp-web.js": "^1.23.0"
+  }
+}
