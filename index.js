@@ -1,4 +1,4 @@
-require("dotenv").config();
+
 
 const fs = require("fs");
 const path = require("path");
@@ -126,3 +126,4 @@ bot.onText(/\/logout/, async (msg) => {
 
     bot.sendMessage(userId, "✅ ʟᴏɢᴏᴜᴛ ꜱᴜᴄᴄᴇꜱꜱ.");
 });
+
