@@ -1,129 +1,138 @@
 
 
-const fs = require("fs");
-const path = require("path");
-const QRCode = require("qrcode");
-const TelegramBot = require("node-telegram-bot-api");
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require("@whiskeysockets/baileys");
-const P = require("pino");
+const TelegramBot = require("node-telegram-bot-api")
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  DisconnectReason
+} = require("@whiskeysockets/baileys")
 
-const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
+const P = require("pino")
+const QRCode = require("qrcode")
+const fs = require("fs")
 
-const sessions = new Map();
-const loginProcesses = new Map();
+const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true })
 
-//////////////////////////////////////////////////////
+const sessions = new Map()
+const loginProcess = new Map()
 
-async function startLogin(userId) {
+// small text style
+const small = (t) => t.toLowerCase()
 
-    if (sessions.has(userId))
-        return bot.sendMessage(userId, "⚠️ ᴀʟʀᴇᴀᴅʏ ʟɪɴᴋᴇᴅ.");
-
-    if (loginProcesses.has(userId))
-        return bot.sendMessage(userId, "⏳ ʟᴏɢɪɴ ɪɴ ᴘʀᴏᴄᴇꜱꜱ.");
-
-    const sessionPath = path.join(__dirname, "sessions", userId.toString());
-    const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-
-    const sock = makeWASocket({
-        auth: state,
-        logger: P({ level: "silent" })
-    });
-
-    loginProcesses.set(userId, sock);
-
-    sock.ev.on("creds.update", saveCreds);
-
-    sock.ev.on("connection.update", async (update) => {
-
-        const { connection, qr, lastDisconnect } = update;
-
-        if (qr) {
-            const qrImage = await QRCode.toBuffer(qr);
-
-            await bot.sendPhoto(userId, qrImage, {
-                caption: "🔐 ꜱᴄᴀɴ ᴡɪᴛʜɪɴ 1 ᴍɪɴᴜᴛᴇ.\n❌ /cancel ᴛᴏ ꜱᴛᴏᴘ."
-            });
-
-            // 1 minute timeout
-            setTimeout(async () => {
-                if (loginProcesses.has(userId)) {
-                    await sock.logout();
-                    loginProcesses.delete(userId);
-                    fs.rmSync(sessionPath, { recursive: true, force: true });
-                    bot.sendMessage(userId, "⌛ ǫʀ ᴇxᴘɪʀᴇᴅ.");
-                }
-            }, 60000);
-        }
-
-        if (connection === "open") {
-            loginProcesses.delete(userId);
-            sessions.set(userId, sock);
-            bot.sendMessage(userId, "✅ ʟɪɴᴋᴇᴅ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ.");
-        }
-
-        if (connection === "close") {
-            const shouldReconnect =
-                lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-
-            if (!shouldReconnect) {
-                sessions.delete(userId);
-                fs.rmSync(sessionPath, { recursive: true, force: true });
-                bot.sendMessage(userId, "⚠️ ᴅɪꜱᴄᴏɴɴᴇᴄᴛᴇᴅ.");
-            }
-        }
-    });
-}
-
-//////////////////////////////////////////////////////
-
+// start
 bot.onText(/\/start/, (msg) => {
-    bot.sendMessage(msg.chat.id,
-`✨ ᴡᴇʟᴄᴏᴍᴇ ᴛᴏ ᴡʜᴀᴛꜱᴀᴘᴘ ʟᴏɢɪɴ ʙᴏᴛ
+  bot.sendMessage(
+    msg.chat.id,
+    small(
+`welcome to whatsapp login bot
 
-/qr — ʟᴏɢɪɴ
-/logout — ʟᴏɢᴏᴜᴛ
-/cancel — ᴄᴀɴᴄᴇʟ`
-    );
-});
+/qr
+/logout
+/cancel`
+    )
+  )
+})
 
-bot.onText(/\/qr/, (msg) => {
-    startLogin(msg.chat.id);
-});
+// QR COMMAND
+bot.onText(/\/qr/, async (msg) => {
+  const id = msg.from.id
 
+  if (sessions.has(id)) {
+    return bot.sendMessage(id, small("you already logged in one account. logout first."))
+  }
+
+  if (loginProcess.has(id)) {
+    return bot.sendMessage(id, small("already in login process."))
+  }
+
+  loginProcess.set(id, true)
+
+  const sessionPath = `./sessions/${id}`
+
+  if (!fs.existsSync("./sessions")) fs.mkdirSync("./sessions")
+
+  const { state, saveCreds } = await useMultiFileAuthState(sessionPath)
+
+  const sock = makeWASocket({
+    auth: state,
+    logger: P({ level: "silent" })
+  })
+
+  sock.ev.on("creds.update", saveCreds)
+
+  let timeout
+
+  sock.ev.on("connection.update", async (update) => {
+    const { connection, qr, lastDisconnect } = update
+
+    if (qr) {
+      const qrImage = await QRCode.toBuffer(qr)
+
+      await bot.sendPhoto(id, qrImage, {
+        caption: small("scan this qr within 1 minute.")
+      })
+
+      timeout = setTimeout(async () => {
+        loginProcess.delete(id)
+        await sock.logout()
+        fs.rmSync(sessionPath, { recursive: true, force: true })
+        bot.sendMessage(id, small("qr expired. login cancelled."))
+      }, 60000)
+    }
+
+    if (connection === "open") {
+      clearTimeout(timeout)
+      loginProcess.delete(id)
+      sessions.set(id, sock)
+      bot.sendMessage(id, small("login successful."))
+    }
+
+    if (connection === "close") {
+      const shouldReconnect =
+        lastDisconnect?.error?.output?.statusCode !==
+        DisconnectReason.loggedOut
+
+      if (!shouldReconnect) {
+        sessions.delete(id)
+        loginProcess.delete(id)
+        fs.rmSync(sessionPath, { recursive: true, force: true })
+      }
+    }
+  })
+})
+
+// CANCEL
 bot.onText(/\/cancel/, async (msg) => {
+  const id = msg.from.id
 
-    const userId = msg.chat.id;
+  if (!loginProcess.has(id)) {
+    return bot.sendMessage(id, small("no active login process."))
+  }
 
-    if (!loginProcesses.has(userId))
-        return bot.sendMessage(userId, "❌ ɴᴏ ʟᴏɢɪɴ ᴘʀᴏᴄᴇꜱꜱ.");
+  loginProcess.delete(id)
+  const sessionPath = `./sessions/${id}`
 
-    const sock = loginProcesses.get(userId);
-    await sock.logout();
+  if (fs.existsSync(sessionPath)) {
+    fs.rmSync(sessionPath, { recursive: true, force: true })
+  }
 
-    const sessionPath = path.join(__dirname, "sessions", userId.toString());
-    fs.rmSync(sessionPath, { recursive: true, force: true });
+  bot.sendMessage(id, small("login process cancelled."))
+})
 
-    loginProcesses.delete(userId);
-
-    bot.sendMessage(userId, "❌ ʟᴏɢɪɴ ᴄᴀɴᴄᴇʟʟᴇᴅ.");
-});
-
+// LOGOUT
 bot.onText(/\/logout/, async (msg) => {
+  const id = msg.from.id
 
-    const userId = msg.chat.id;
+  if (!sessions.has(id)) {
+    return bot.sendMessage(id, small("no active session found."))
+  }
 
-    if (!sessions.has(userId))
-        return bot.sendMessage(userId, "❌ ɴᴏ ᴀᴄᴛɪᴠᴇ ꜱᴇꜱꜱɪᴏɴ.");
+  const sock = sessions.get(id)
+  await sock.logout()
 
-    const sock = sessions.get(userId);
-    await sock.logout();
+  sessions.delete(id)
 
-    const sessionPath = path.join(__dirname, "sessions", userId.toString());
-    fs.rmSync(sessionPath, { recursive: true, force: true });
+  const sessionPath = `./sessions/${id}`
+  fs.rmSync(sessionPath, { recursive: true, force: true })
 
-    sessions.delete(userId);
-
-    bot.sendMessage(userId, "✅ ʟᴏɢᴏᴜᴛ ꜱᴜᴄᴄᴇꜱꜱ.");
-});
-
+  bot.sendMessage(id, small("logged out successfully."))
